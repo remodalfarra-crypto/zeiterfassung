@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profi Zeiterfassung V2 🕒</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-color: #1e1e2e; color: #cdd6f4; padding: 20px; }
+        .timer { font-size: 5rem; font-weight: bold; font-family: 'Courier New', monospace; margin-bottom: 10px; color: #a6e3a1; text-shadow: 0 0 20px rgba(166, 227, 161, 0.2); }
+        .status-container { width: 100%; max-width: 400px; background: #313244; padding: 15px; border-radius: 12px; margin-bottom: 20px; text-align: center; border: 1px solid #45475a; }
+        .progress-bar { width: 100%; height: 12px; background: #45475a; border-radius: 6px; margin-top: 10px; overflow: hidden; }
+        .progress-fill { height: 100%; background: #a6e3a1; width: 0%; transition: width 0.5s; }
+        .controls button { padding: 15px 25px; font-size: 1.1rem; cursor: pointer; border: none; border-radius: 8px; font-weight: bold; margin: 5px; transition: 0.2s; }
+        .start { background-color: #94e2d5; color: #11111b; }
+        .pause { background-color: #f9e2af; color: #11111b; }
+        .stop { background-color: #f38ba8; color: #11111b; }
+        .extra-controls { margin: 15px 0; display: flex; gap: 10px; }
+        .zigarette { background-color: #fab387; color: #11111b; padding: 10px 15px; border-radius: 8px; font-weight: bold; cursor: pointer; border: none; }
+        .nachbuchen { background-color: #89b4fa; color: #11111b; padding: 10px 15px; border-radius: 8px; font-weight: bold; cursor: pointer; border: none; }
+        .info-text { font-size: 0.9rem; color: #9399b2; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="status-container">
+        <div id="dayLabel" style="font-weight: bold; color: #89b4fa; font-size: 1.2rem;">Lade Tag...</div>
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        <div id="targetLabel" style="font-size: 0.9rem; color: #9399b2; margin-top: 5px;">Soll: --:--:--</div>
+    </div>
+
+    <div id="sessionInfo" class="info-text">Noch nicht gestartet</div>
+    <div class="timer" id="display">00:00:00</div>
+    
+    <div class="controls">
+        <button id="startBtn" class="start" onclick="start()">Start</button>
+        <button id="pauseBtn" class="pause" onclick="pause()" disabled>Pause</button>
+        <button class="stop" onclick="stopAndLog()">Feierabend & Sync</button>
+    </div>
+
+    <div class="extra-controls">
+        <button class="zigarette" onclick="smokeBreak()">🚬 Zigarette (-5 Min)</button>
+        <button class="nachbuchen" onclick="addTime()">⏳ Zeit nachbuchen</button>
+    </div>
+
+    <script>
+        // HIER DEINE WEB-APP URL EINTRAGEN
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzW5ekTNGEnbMADFWVpyR3NTPpp1QQUC6CTWdCwvsdLrnHT3yTxiin_Qdg71E9-f272/exec";
+let elapsedTime = 0;
+let isRunning = false;
+let sessionStartTime = "";
+let totalPauseTime = 0;
+let pauseStartTimestamp = null;
+let startTime, timerInterval, targetMs;
+const days = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
+
+function initApp() {
+    const heute = new Date().toLocaleDateString('de-DE');
+    const gespeichertesDatum = localStorage.getItem('lastUpdateDate');
+
+    // Automatischer Reset bei neuem Tag
+    if (gespeichertesDatum !== heute) {
+        localStorage.clear();
+        localStorage.setItem('lastUpdateDate', heute);
+    } else {
+        elapsedTime = parseInt(localStorage.getItem('elapsedTime')) || 0;
+        isRunning = localStorage.getItem('isRunning') === 'true';
+        sessionStartTime = localStorage.getItem('sessionStartTime') || "";
+        totalPauseTime = parseInt(localStorage.getItem('totalPauseTime')) || 0;
+        pauseStartTimestamp = parseInt(localStorage.getItem('pauseStartTimestamp')) || null;
+    }
+}
+
+window.onload = async function() {
+    initApp(); // Daten laden und Check durchführen
+    
+    targetMs = getTargetForDate(new Date());
+    document.getElementById("dayLabel").innerText = days[new Date().getDay()];
+    document.getElementById("targetLabel").innerText = `Tagesziel: ${timeToString(targetMs)}`;
+    
+    // Cloud-Abgleich
+    await syncFromCloud();
+    
+    updateDisplay();
+    if (sessionStartTime) {
+        document.getElementById("sessionInfo").innerText = `Start heute: ${sessionStartTime}`;
+    }
+    
+    if (isRunning) {
+        let lastTimestamp = parseInt(localStorage.getItem('lastTimestamp')) || Date.now();
+        elapsedTime += (Date.now() - lastTimestamp);
+        start(true); 
+    }
+};
+
+async function syncToCloud() {
+    const payload = {
+        type: "SYNC",
+        elapsedTime: elapsedTime,
+        startTime: sessionStartTime,
+        isRunning: isRunning,
+        totalPauseTime: totalPauseTime,
+        lastTimestamp: Date.now()
+    };
+    fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", body: JSON.stringify(payload) });
+}
+
+async function syncFromCloud() {
+    try {
+        const response = await fetch(WEB_APP_URL);
+        const cloud = await response.json();
+        
+        // Nur synchronisieren, wenn Daten in der Cloud neuer sind (oder lokal alles leer ist)
+        if (cloud.elapsedTime && (cloud.elapsedTime > elapsedTime || elapsedTime === 0)) {
+            elapsedTime = cloud.elapsedTime;
+            sessionStartTime = cloud.startTime;
+            totalPauseTime = cloud.totalPauseTime || 0;
+            
+            localStorage.setItem('elapsedTime', elapsedTime);
+            localStorage.setItem('sessionStartTime', sessionStartTime);
+            localStorage.setItem('totalPauseTime', totalPauseTime);
+            localStorage.setItem('lastUpdateDate', new Date().toLocaleDateString('de-DE'));
+
+            document.getElementById("sessionInfo").innerText = `Start heute: ${sessionStartTime}`;
+            updateDisplay();
+
+            if (cloud.isRunning === true && !isRunning) {
+                let offset = Date.now() - cloud.lastTimestamp;
+                elapsedTime += offset;
+                start(true);
+            }
+        }
+    } catch (e) { console.log("Cloud leer oder Fehler."); }
+}
+
+function getTargetForDate(dateObj) {
+    const day = dateObj.getDay();
+    if (day === 5) return (4 * 3600 + 12 * 60) * 1000;
+    return (day === 0 || day === 6) ? 0 : (8 * 3600 + 24 * 60) * 1000;
+}
+
+function updateDisplay() {
+    document.getElementById("display").innerHTML = timeToString(elapsedTime);
+    if (targetMs > 0) {
+        let percent = (elapsedTime / targetMs) * 100;
+        document.getElementById("progressFill").style.width = Math.min(percent, 100) + "%";
+    }
+}
+
+function timeToString(time, showSign = false) {
+    const absTime = Math.abs(time);
+    let hh = Math.floor(absTime / 3600000).toString().padStart(2, '0');
+    let mm = Math.floor((absTime % 3600000) / 60000).toString().padStart(2, '0');
+    let ss = Math.floor((absTime % 60000) / 1000).toString().padStart(2, '0');
+    return (showSign ? (time >= 0 ? "+" : "-") : "") + `${hh}:${mm}:${ss}`;
+}
+
+function start(isAutoResume = false) {
+    if (!sessionStartTime) {
+        sessionStartTime = new Date().toLocaleTimeString('de-DE', {hour: '2-digit', minute:'2-digit'});
+        localStorage.setItem('sessionStartTime', sessionStartTime);
+        document.getElementById("sessionInfo").innerText = `Start heute: ${sessionStartTime}`;
+    }
+
+    if (pauseStartTimestamp) {
+        totalPauseTime += (Date.now() - pauseStartTimestamp);
+        localStorage.setItem('totalPauseTime', totalPauseTime);
+        pauseStartTimestamp = null;
+        localStorage.removeItem('pauseStartTimestamp');
+    }
+
+    if (timerInterval) clearInterval(timerInterval);
+    if (!isAutoResume) { isRunning = true; localStorage.setItem('isRunning', 'true'); }
+    
+    startTime = Date.now() - elapsedTime;
+    timerInterval = setInterval(() => {
+        elapsedTime = Date.now() - startTime;
+        updateDisplay();
+        localStorage.setItem('elapsedTime', elapsedTime);
+        localStorage.setItem('lastTimestamp', Date.now());
+        
+        // Alle 30 Sekunden Sync-Ping
+        if (Math.floor(elapsedTime / 1000) % 30 === 0) {
+            syncToCloud();
+        }
+    }, 1000);
+    
+    document.getElementById("startBtn").disabled = true;
+    document.getElementById("pauseBtn").disabled = false;
+    syncToCloud();
+}
+
+function pause() {
+    clearInterval(timerInterval);
+    isRunning = false;
+    pauseStartTimestamp = Date.now();
+    localStorage.setItem('pauseStartTimestamp', pauseStartTimestamp);
+    localStorage.setItem('isRunning', 'false');
+    document.getElementById("startBtn").disabled = false;
+    document.getElementById("pauseBtn").disabled = true;
+    syncToCloud();
+}
+
+function smokeBreak() {
+    elapsedTime -= (5 * 60 * 1000);
+    if (isRunning) startTime = Date.now() - elapsedTime;
+    updateDisplay();
+    localStorage.setItem('elapsedTime', elapsedTime);
+    syncToCloud();
+}
+
+function addTime() {
+    let mins = prompt("Minuten hinzufügen?", "15");
+    if (mins != null && !isNaN(mins)) {
+        elapsedTime += (parseInt(mins) * 60 * 1000);
+        if (isRunning) startTime = Date.now() - elapsedTime;
+        updateDisplay();
+        localStorage.setItem('elapsedTime', elapsedTime);
+        syncToCloud();
+    }
+}
+
+async function stopAndLog() {
+    if (elapsedTime === 0 || !confirm("Tag beenden und Daten an Google Sheets senden?")) return;
+    
+    let stopTime = new Date().toLocaleTimeString('de-DE', {hour: '2-digit', minute:'2-digit'});
+    
+    const payload = {
+        date: new Date().toLocaleDateString('de-DE'),
+        weekday: days[new Date().getDay()],
+        startTime: sessionStartTime,
+        stopTime: stopTime,
+        pauseDuration: timeToString(totalPauseTime),
+        duration: timeToString(elapsedTime),
+        target: timeToString(targetMs),
+        diff: timeToString(elapsedTime - targetMs, true)
+    };
+
+    try {
+        await fetch(WEB_APP_URL, {
+            method: "POST",
+            mode: "no-cors",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        
+        // Cloud-Status für heute löschen
+        await fetch(WEB_APP_URL, { method: "POST", mode: "no-cors", body: JSON.stringify({type: "CLEAR"}) });
+
+        alert("Erfolgreich gespeichert!");
+        
+        clearInterval(timerInterval);
+        localStorage.clear();
+        location.reload();
+    } catch (e) {
+        alert("Fehler beim Senden!");
+    }
+}
+</script>
+</body>
+</html>
